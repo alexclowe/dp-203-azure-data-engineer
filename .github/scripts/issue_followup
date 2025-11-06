@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-import os, sys, json, requests, yaml, datetime
+import os, sys, json, requests, yaml, datetime, re
 from pathlib import Path
+from fnmatch import fnmatch
 
 API = "https://api.github.com"
 
@@ -31,6 +32,9 @@ def search_open_triage(repo):
     res = gh("GET", "/search/issues", params={"q": q, "per_page": 100})
     return res.get("items", [])
 
+def get_issue(repo, number):
+    return gh("GET", f"/repos/{repo}/issues/{number}")
+
 def list_comments(repo, issue_number):
     out, page = [], 1
     while True:
@@ -42,56 +46,93 @@ def list_comments(repo, issue_number):
         page += 1
     return out
 
-def get_issue(repo, number):
-    return gh("GET", f"/repos/{repo}/issues/{number}")
+def has_label(issue, name):
+    return any(l["name"].lower() == name.lower() for l in issue.get("labels", []))
 
 def add_labels(repo, issue_number, labels):
     if labels:
         gh("POST", f"/repos/{repo}/issues/{issue_number}/labels", json={"labels": labels})
 
-def has_label(issue, name):
-    return any(l["name"].lower() == name.lower() for l in issue.get("labels", []))
-
 def comment(repo, issue_number, body):
     gh("POST", f"/repos/{repo}/issues/{issue_number}/comments", json={"body": body})
+
+def extract_paths_from_issue(issue):
+    title, body = issue["title"], issue.get("body","")
+    text = f"{title}\n\n{body or ''}"
+    paths = set()
+    for m in re.finditer(r'((?:docs|guides|content|articles)/[^\s`]+?\.md)', text, re.I):
+        paths.add(m.group(1).strip().strip('.,)'))
+    for m in re.finditer(r'https?://github\.com/[^/]+/[^/]+/blob/[^/]+/([^\s#]+?\.md)', text, re.I):
+        paths.add(m.group(1))
+    for m in re.finditer(r'(?im)^(?:affected page|affected|path|file)\s*[:\-]\s*(.+\.md)\s*$', text):
+        paths.add(m.group(1).strip())
+    return list(paths)
+
+def match_route(cfg, candidate_paths):
+    routes = cfg.get("routes") or []
+    for p in candidate_paths:
+        p_norm = p.strip().lstrip("/")
+        for rule in routes:
+            patt = rule.get("pattern")
+            if patt and fnmatch(p_norm, patt):
+                cds = [u.lstrip("@") for u in (rule.get("content_developers") or [])]
+                mgrs = [u.lstrip("@") for u in (rule.get("cd_managers") or [])]
+                return cds, mgrs
+    return None, None
+
+def split_assignables(user_or_team_list):
+    assignable = []
+    mentions = []
+    for s in user_or_team_list or []:
+        s = s.lstrip("@")
+        mentions.append(s)
+        # (assignee filtering unused here, but keep same helper for symmetry)
+        if "/" not in s:
+            assignable.append(s)
+    return assignable, mentions
 
 def main():
     repo = arg("repo")
     cfg = yaml.safe_load(Path(arg("config") or ".github/agent.yml").read_text(encoding="utf-8"))
 
-    cds = [u.lstrip("@") for u in cfg.get("content_developers", [])]
-    mgrs = [u.lstrip("@") for u in cfg.get("cd_managers", [])]
+    default_cds = [u.lstrip("@") for u in cfg.get("content_developers", [])]
+    default_mgrs = [u.lstrip("@") for u in cfg.get("cd_managers", [])]
     labels_cfg = cfg.get("labels", {}) or {}
     triage_hex  = labels_cfg.get("triage", "B36B00")
     overdue_hex = labels_cfg.get("overdue", "D93F0B")
     status_in_progress = (cfg.get("status_in_progress_label") or "status:in-progress").strip()
     followup_days = int(cfg.get("followup_days", 7))
 
-    # Ensure overdue exists
     ensure_label(repo, "overdue", overdue_hex)
 
-    cutoff_date = (datetime.datetime.utcnow() - datetime.timedelta(days=followup_days)).date().isoformat()
-
+    # All open triage issues
     items = search_open_triage(repo)
+
+    cutoff_date = (datetime.datetime.utcnow() - datetime.timedelta(days=followup_days)).date().isoformat()
 
     for it in items:
         number = it["number"]
         issue = get_issue(repo, number)
 
-        # Skip if status:in-progress is present
+        # Skip if marked in progress
         if has_label(issue, status_in_progress):
             continue
 
-        created = issue["created_at"][:10]  # YYYY-MM-DD
+        # Old enough?
+        created = issue["created_at"][:10]
         if created >= cutoff_date:
-            continue  # not old enough
+            continue
 
-        # Determine if any CD has commented
+        # Route-specific CDs/managers (recomputed from the issue text)
+        paths = extract_paths_from_issue(issue)
+        route_cds, route_mgrs = match_route(cfg, paths)
+        cds = route_cds or default_cds
+        mgrs = route_mgrs or default_mgrs
+
+        # Has any CD commented?
         comments = list_comments(repo, number)
-        cd_commented = any(
-            (c.get("user",{}).get("login","").lower() in [u.lower() for u in cds])
-            for c in comments
-        )
+        cd_logins_lower = {u.lower() for u in cds}
+        cd_commented = any((c.get("user",{}).get("login","").lower() in cd_logins_lower) for c in comments)
         if cd_commented:
             continue
 
@@ -99,11 +140,13 @@ def main():
         if not has_label(issue, "overdue"):
             add_labels(repo, number, ["overdue"])
 
-        mention_cds = " ".join(f"@{u}" for u in cds) if cds else ""
-        mention_mgrs = " ".join(f"@{u}" for u in mgrs) if mgrs else ""
+        # Mentions (teams allowed)
+        _, mention_cds = split_assignables(cds)
+        _, mention_mgrs = split_assignables(mgrs)
+
         body = (
             f"⏰ **Follow-up:** No Content Developer response in {followup_days} days.\n\n"
-            f"{mention_cds} {mention_mgrs}\n\n"
+            f"{' '.join('@'+u for u in mention_cds)} {' '.join('@'+u for u in mention_mgrs)}\n\n"
             f"Please acknowledge or triage this issue."
         ).strip()
         comment(repo, number, body)

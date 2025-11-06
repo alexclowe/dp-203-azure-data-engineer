@@ -1,7 +1,7 @@
 name: Issue Follow-up (7-day ping)
 on:
   schedule:
-    - cron: "15 13 * * *"   # daily at 13:15 UTC (adjust as you like)
+    - cron: "15 13 * * *"   # daily at 13:15 UTC
   workflow_dispatch:
 
 permissions:
@@ -31,5 +31,4 @@ jobs:
         run: |
           python .github/scripts/issue_followup.py \
             --repo "$REPO" \
-            --config ".github/agent.yml" \
-            --days 7
+            --config ".github/agent.yml"

@@ -1,0 +1,9 @@
+content_developers:
+  - alexclowe        # GitHub usernames or org/team slugs (e.g., org/team-name)
+  # - org/docs-cd    # You can @mention teams too
+
+cd_managers:
+  - alexclowe  # One or more managers to notify on follow-ups
+
+labels:
+  triage: "B36B00"   # hex color for the triage label (created if missing)

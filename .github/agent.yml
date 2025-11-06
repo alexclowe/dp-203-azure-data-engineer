@@ -1,9 +1,25 @@
+# People
 content_developers:
-  - alexclowe        # GitHub usernames or org/team slugs (e.g., org/team-name)
-  # - org/docs-cd    # You can @mention teams too
-
+  - alexclowe            # default assignees if no route match
 cd_managers:
-  - alexclowe  # One or more managers to notify on follow-ups
+  - alexclowe
 
+# Labels & timing
 labels:
-  triage: "B36B00"   # hex color for the triage label (created if missing)
+  triage: "B36B00"
+  overdue: "D93F0B"       # color for the overdue label
+status_in_progress_label: "status:in-progress"
+
+# Follow-up timing
+followup_days: 7           # change to 10, 14, etc.
+
+# Per-folder routing rules (first match wins; GLOB patterns)
+# If the issue body (or template field) mentions a matching path, assign these CDs instead.
+routes:
+  - pattern: "/**"
+    content_developers:
+      - alexclowe
+  #- pattern: "guides/**"
+  #  content_developers:
+  #    - another-user
+  # default falls back to content_developers above

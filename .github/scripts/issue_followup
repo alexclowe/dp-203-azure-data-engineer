@@ -108,6 +108,10 @@ def main():
     # All open triage issues
     items = search_open_triage(repo)
 
+    #skip any items that are not open
+    if issue.get("state","").lower() != "open":
+        continue
+
     cutoff_date = (datetime.datetime.utcnow() - datetime.timedelta(days=followup_days)).date().isoformat()
 
     for it in items:

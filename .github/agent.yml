@@ -1,25 +1,29 @@
-# People
+# People (fallbacks if no route matches)
 content_developers:
-  - alexclowe            # default assignees if no route match
+  - alexclowe            # GitHub usernames (assignable)
 cd_managers:
-  - alexclowe
+  - alexclowe      # usernames or team slugs like org/team (mentioned, not assigned)
 
 # Labels & timing
 labels:
   triage: "B36B00"
-  overdue: "D93F0B"       # color for the overdue label
+  overdue: "D93F0B"
 status_in_progress_label: "status:in-progress"
 
-# Follow-up timing
-followup_days: 7           # change to 10, 14, etc.
+# Follow-up window
+followup_days: 7         # e.g., 10
 
 # Per-folder routing rules (first match wins; GLOB patterns)
-# If the issue body (or template field) mentions a matching path, assign these CDs instead.
 routes:
-  - pattern: "/**"
+  - pattern: "docs/getting-started/**"
     content_developers:
       - alexclowe
-  #- pattern: "guides/**"
-  #  content_developers:
-  #    - another-user
-  # default falls back to content_developers above
+    cd_managers:
+      - msft-cd-manager
+  - pattern: "guides/**"
+    content_developers:
+      - another-user
+    cd_managers:
+      - msft-cd-manager2
+  # default fallback uses top-level content_developers and cd_managers
+

@@ -27,7 +27,6 @@ def has_label(issue, name):
     return any(l["name"].lower() == name.lower() for l in issue.get("labels", []))
 
 def remove_label(repo, number, name):
-    # DELETE /repos/{owner}/{repo}/issues/{issue_number}/labels/{name}
     requests.delete(
         f"{API}/repos/{repo}/issues/{number}/labels/{requests.utils.quote(name, safe='')}",
         headers={"Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
@@ -40,10 +39,13 @@ def main():
     commenter = (arg("commenter") or "").strip().lower()
     cfg = yaml.safe_load(Path(arg("config") or ".github/agent.yml").read_text(encoding="utf-8"))
 
-    cds = [u.lstrip("@").lower() for u in cfg.get("content_developers", [])]
+    # Any configured CD (global or in routes) should clear 'overdue' when they comment.
+    all_cds = set(u.lstrip("@").lower() for u in (cfg.get("content_developers") or []))
+    for route in (cfg.get("routes") or []):
+        for u in (route.get("content_developers") or []):
+            all_cds.add(u.lstrip("@").lower())
 
-    # If the commenter is a Content Developer, remove 'overdue' label if present
-    if commenter and commenter in cds:
+    if commenter and commenter in all_cds:
         issue = get_issue(repo, issue_number)
         if has_label(issue, "overdue"):
             remove_label(repo, issue_number, "overdue")

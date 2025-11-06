@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os, sys, re, requests, yaml
 from pathlib import Path
+from fnmatch import fnmatch
 
 API = "https://api.github.com"
 
@@ -43,29 +44,37 @@ def get_issue(repo, number):
 def extract_paths(title, body):
     text = f"{title}\n\n{body or ''}"
     paths = set()
-    # common patterns: docs/foo/bar.md, guides/..., or URLs to repo files
     for m in re.finditer(r'((?:docs|guides|content|articles)/[^\s`]+?\.md)', text, re.I):
         paths.add(m.group(1).strip().strip('.,)'))
     for m in re.finditer(r'https?://github\.com/[^/]+/[^/]+/blob/[^/]+/([^\s#]+?\.md)', text, re.I):
         paths.add(m.group(1))
-    # issue form field "Affected page" sometimes shows alone on a line
     for m in re.finditer(r'(?im)^(?:affected page|affected|path|file)\s*[:\-]\s*(.+\.md)\s*$', text):
         paths.add(m.group(1).strip())
     return list(paths)
 
-def pick_assignees_by_routes(cfg, candidate_paths):
+def match_route(cfg, candidate_paths):
     routes = cfg.get("routes") or []
     for p in candidate_paths:
         p_norm = p.strip().lstrip("/")
         for rule in routes:
             patt = rule.get("pattern")
-            cds = [u.lstrip("@") for u in (rule.get("content_developers") or [])]
-            if patt and cds:
-                # glob match
-                from fnmatch import fnmatch
-                if fnmatch(p_norm, patt):
-                    return cds, p_norm
-    return None, None
+            if patt and fnmatch(p_norm, patt):
+                cds = [u.lstrip("@") for u in (rule.get("content_developers") or [])]
+                mgrs = [u.lstrip("@") for u in (rule.get("cd_managers") or [])]
+                return cds, mgrs, p_norm
+    return None, None, None
+
+def split_assignables(user_or_team_list):
+    """Return (assignable_usernames, mentionables_including_teams).
+    Teams contain '/', cannot be assignees for issues."""
+    assignable = []
+    mentions = []
+    for s in user_or_team_list or []:
+        s = s.lstrip("@")
+        mentions.append(s)
+        if "/" not in s:
+            assignable.append(s)
+    return assignable, mentions
 
 def main():
     repo = arg("repo")
@@ -73,33 +82,37 @@ def main():
     cfg = yaml.safe_load(Path(arg("config") or ".github/agent.yml").read_text(encoding="utf-8"))
 
     default_cds = [u.lstrip("@") for u in cfg.get("content_developers", [])]
-    mgrs = [u.lstrip("@") for u in cfg.get("cd_managers", [])]
+    default_mgrs = [u.lstrip("@") for u in cfg.get("cd_managers", [])]
     triage_hex = (cfg.get("labels", {}) or {}).get("triage", "B36B00")
     overdue_hex = (cfg.get("labels", {}) or {}).get("overdue", "D93F0B")
 
-    # Ensure labels exist
     ensure_label(repo, "triage", triage_hex)
     ensure_label(repo, "overdue", overdue_hex)
 
     issue = get_issue(repo, issue_number)
     title, body = issue["title"], issue.get("body","")
     paths = extract_paths(title, body)
-    route_cds, matched_path = pick_assignees_by_routes(cfg, paths)
 
-    assignees = route_cds or default_cds
+    route_cds, route_mgrs, matched_path = match_route(cfg, paths)
+    cds = route_cds or default_cds
+    mgrs = route_mgrs or default_mgrs
 
-    # Label, assign, notify
+    # Assign only real usernames; still @mention teams
+    assignable_cds, mention_cds = split_assignables(cds)
+    _, mention_mgrs = split_assignables(mgrs)
+
+    # triage label + assignment
     add_labels(repo, issue_number, ["triage"])
-    if assignees:
-        add_assignees(repo, issue_number, assignees)
+    if assignable_cds:
+        add_assignees(repo, issue_number, assignable_cds)
 
-    mention_cds = " ".join(f"@{u}" for u in assignees) if assignees else "(none)"
-    mention_mgrs = " ".join(f"@{u}" for u in mgrs) if mgrs else "(none)"
+    mcds = " ".join(f"@{u}" for u in mention_cds) if mention_cds else "(none)"
+    mmgrs = " ".join(f"@{u}" for u in mention_mgrs) if mention_mgrs else "(none)"
     path_note = f"\n- Matched path: `{matched_path}`" if matched_path else ""
     body = (
         f"🔔 **New issue intake**\n\n"
-        f"- Content Developer(s): {mention_cds}\n"
-        f"- CD Manager(s): {mention_mgrs}"
+        f"- Content Developer(s): {mcds}\n"
+        f"- CD Manager(s): {mmgrs}"
         f"{path_note}\n\n"
         f"Labelled with `triage` and assigned to Content Developer(s)."
     )

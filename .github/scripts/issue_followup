@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 import os, sys, json, requests, yaml, datetime
 from pathlib import Path
-from dateutil import tz
+
+API = "https://api.github.com"
 
 def arg(name):
     for i,a in enumerate(sys.argv):
         if a == f"--{name}" and i+1 < len(sys.argv): return sys.argv[i+1]
     return None
-
-GITHUB_API = "https://api.github.com"
 
 def gh(method, path, **kwargs):
     headers = kwargs.pop("headers", {})
@@ -16,56 +15,98 @@ def gh(method, path, **kwargs):
         "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
         "Accept": "application/vnd.github+json"
     })
-    r = requests.request(method, f"{GITHUB_API}{path}", headers=headers, **kwargs)
+    r = requests.request(method, f"{API}{path}", headers=headers, **kwargs)
     if r.status_code >= 300:
         raise RuntimeError(f"{method} {path} -> {r.status_code}: {r.text}")
     return r.json() if r.text else {}
 
-def search_triage_older_than(repo, days):
-    # Search open triage issues created before N days ago
-    cutoff = (datetime.datetime.utcnow() - datetime.timedelta(days=days)).date().isoformat()
-    q = f"repo:{repo} is:issue is:open label:triage created:<{cutoff}"
+def ensure_label(repo, name, color_hex):
+    try:
+        gh("GET", f"/repos/{repo}/labels/{name}")
+    except Exception:
+        gh("POST", f"/repos/{repo}/labels", json={"name": name, "color": color_hex.lstrip("#")})
+
+def search_open_triage(repo):
+    q = f"repo:{repo} is:issue is:open label:triage"
     res = gh("GET", "/search/issues", params={"q": q, "per_page": 100})
     return res.get("items", [])
 
 def list_comments(repo, issue_number):
-    out = []
-    page = 1
+    out, page = [], 1
     while True:
-        res = gh("GET", f"/repos/{repo}/issues/{issue_number}/comments", params={"per_page":100, "page":page})
+        res = gh("GET", f"/repos/{repo}/issues/{issue_number}/comments",
+                 params={"per_page":100, "page":page})
         if not res: break
         out.extend(res)
         if len(res) < 100: break
         page += 1
     return out
 
+def get_issue(repo, number):
+    return gh("GET", f"/repos/{repo}/issues/{number}")
+
+def add_labels(repo, issue_number, labels):
+    if labels:
+        gh("POST", f"/repos/{repo}/issues/{issue_number}/labels", json={"labels": labels})
+
+def has_label(issue, name):
+    return any(l["name"].lower() == name.lower() for l in issue.get("labels", []))
+
 def comment(repo, issue_number, body):
     gh("POST", f"/repos/{repo}/issues/{issue_number}/comments", json={"body": body})
 
 def main():
     repo = arg("repo")
-    cfg_path = Path(arg("config") or ".github/agent.yml")
-    days = int(arg("days") or "7")
-    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    cds = [a.lstrip("@") for a in cfg.get("content_developers", [])]
-    mgrs = [a.lstrip("@") for a in cfg.get("cd_managers", [])]
+    cfg = yaml.safe_load(Path(arg("config") or ".github/agent.yml").read_text(encoding="utf-8"))
 
-    items = search_triage_older_than(repo, days)
+    cds = [u.lstrip("@") for u in cfg.get("content_developers", [])]
+    mgrs = [u.lstrip("@") for u in cfg.get("cd_managers", [])]
+    labels_cfg = cfg.get("labels", {}) or {}
+    triage_hex  = labels_cfg.get("triage", "B36B00")
+    overdue_hex = labels_cfg.get("overdue", "D93F0B")
+    status_in_progress = (cfg.get("status_in_progress_label") or "status:in-progress").strip()
+    followup_days = int(cfg.get("followup_days", 7))
+
+    # Ensure overdue exists
+    ensure_label(repo, "overdue", overdue_hex)
+
+    cutoff_date = (datetime.datetime.utcnow() - datetime.timedelta(days=followup_days)).date().isoformat()
+
+    items = search_open_triage(repo)
+
     for it in items:
         number = it["number"]
-        # Has any comment from a Content Developer?
-        comments = list_comments(repo, number)
-        cd_commented = any(c.get("user",{}).get("login","").lower() in [u.lower() for u in cds] for c in comments)
+        issue = get_issue(repo, number)
 
-        if not cd_commented:
-            mention_cds = " ".join(f"@{u}" for u in cds) if cds else ""
-            mention_mgrs = " ".join(f"@{u}" for u in mgrs) if mgrs else ""
-            body = (
-                f"⏰ **Follow-up:** No Content Developer response in {days} days.\n\n"
-                f"{mention_cds} {mention_mgrs}\n\n"
-                f"Please acknowledge or triage this issue."
-            ).strip()
-            comment(repo, number, body)
+        # Skip if status:in-progress is present
+        if has_label(issue, status_in_progress):
+            continue
+
+        created = issue["created_at"][:10]  # YYYY-MM-DD
+        if created >= cutoff_date:
+            continue  # not old enough
+
+        # Determine if any CD has commented
+        comments = list_comments(repo, number)
+        cd_commented = any(
+            (c.get("user",{}).get("login","").lower() in [u.lower() for u in cds])
+            for c in comments
+        )
+        if cd_commented:
+            continue
+
+        # Add overdue label (idempotent)
+        if not has_label(issue, "overdue"):
+            add_labels(repo, number, ["overdue"])
+
+        mention_cds = " ".join(f"@{u}" for u in cds) if cds else ""
+        mention_mgrs = " ".join(f"@{u}" for u in mgrs) if mgrs else ""
+        body = (
+            f"⏰ **Follow-up:** No Content Developer response in {followup_days} days.\n\n"
+            f"{mention_cds} {mention_mgrs}\n\n"
+            f"Please acknowledge or triage this issue."
+        ).strip()
+        comment(repo, number, body)
 
 if __name__ == "__main__":
     main()
